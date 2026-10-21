@@ -54,6 +54,7 @@ lazy_static! {
         let mut tasks = [TaskControlBlock {
             task_cx: TaskContext::zero_init(),
             task_status: TaskStatus::UnInit,
+            syscall_times: [0; 5],
         }; MAX_APP_NUM];
         for (i, task) in tasks.iter_mut().enumerate() {
             task.task_cx = TaskContext::goto_restore(init_app_cx(i));
@@ -140,6 +141,20 @@ impl TaskManager {
 /// Run the first task in task list.
 pub fn run_first_task() {
     TASK_MANAGER.run_first_task();
+}
+
+/// Record before dispatch so a trace query includes itself and a yielding
+/// syscall remains attributed to its caller, even across a context switch.
+pub fn record_current_syscall(id: usize) {
+    let mut inner = TASK_MANAGER.inner.exclusive_access();
+    let current = inner.current_task;
+    inner.tasks[current].record_syscall(id);
+}
+
+/// Read the current task's count; never hold the task-manager borrow on return.
+pub fn current_syscall_count(id: usize) -> usize {
+    let inner = TASK_MANAGER.inner.exclusive_access();
+    inner.tasks[inner.current_task].syscall_count(id)
 }
 
 /// Switch current `Running` task to the task we have found,

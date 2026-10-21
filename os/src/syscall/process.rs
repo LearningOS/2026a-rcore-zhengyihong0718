@@ -38,8 +38,19 @@ pub fn sys_get_time(ts: *mut TimeVal, _tz: usize) -> isize {
     0
 }
 
-// TODO: implement the syscall
-pub fn sys_trace(_trace_request: usize, _id: usize, _data: usize) -> isize {
+// AI assistance: Codex; semantics follow the official chapter 3 exercise.
+// https://github.com/LearningOS/rCore-Tutorial-Guide/blob/main/source/chapter3/5exercise.rst
+// Chapter 3 has no address-space isolation; the exercise explicitly permits
+// unchecked user addresses. Volatile access observes each byte read/write.
+pub fn sys_trace(trace_request: usize, id: usize, data: usize) -> isize {
     trace!("kernel: sys_trace");
-    -1
+    match trace_request {
+        0 => unsafe { (id as *const u8).read_volatile() as isize },
+        1 => {
+            unsafe { (id as *mut u8).write_volatile(data as u8) };
+            0
+        }
+        2 => crate::task::current_syscall_count(id) as isize,
+        _ => -1,
+    }
 }
