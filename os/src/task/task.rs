@@ -16,6 +16,7 @@ pub struct TaskControlBlock {
 impl TaskControlBlock {
     // AI assistance: Codex. Contract: rCore-Tutorial-Guide, chapter3/5exercise.
     // Only supported calls can return to userspace; other IDs have count zero.
+    /// Count one invocation of a syscall supported by this chapter.
     pub fn record_syscall(&mut self, id: usize) {
         if let Some(index) = crate::syscall::SYSCALL_IDS
             .iter()
@@ -25,6 +26,7 @@ impl TaskControlBlock {
         }
     }
 
+    /// Return this task's invocation count, or zero for an unsupported ID.
     pub fn syscall_count(&self, id: usize) -> usize {
         crate::syscall::SYSCALL_IDS
             .iter()
