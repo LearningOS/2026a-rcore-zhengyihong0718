@@ -202,3 +202,32 @@ pub fn current_trap_cx() -> &'static mut TrapContext {
 pub fn change_program_brk(size: i32) -> Option<usize> {
     TASK_MANAGER.change_current_program_brk(size)
 }
+
+/// Access the current task without retaining a manager borrow across scheduling.
+pub fn with_current_task<T>(f: impl FnOnce(&mut TaskControlBlock) -> T) -> T {
+    let mut inner = TASK_MANAGER.inner.exclusive_access();
+    let current = inner.current_task;
+    f(&mut inner.tasks[current])
+}
+
+/// Count a syscall before dispatch, including the trace query itself.
+pub fn record_current_syscall(id: usize) {
+    if let Some(index) = crate::syscall::SYSCALL_IDS
+        .iter()
+        .position(|&value| value == id)
+    {
+        with_current_task(|task| {
+            task.syscall_times[index] = task.syscall_times[index].saturating_add(1)
+        });
+    }
+}
+
+/// Query this task only; unsupported syscall IDs have never been invoked.
+pub fn current_syscall_count(id: usize) -> usize {
+    crate::syscall::SYSCALL_IDS
+        .iter()
+        .position(|&value| value == id)
+        .map_or(0, |index| {
+            with_current_task(|task| task.syscall_times[index])
+        })
+}
