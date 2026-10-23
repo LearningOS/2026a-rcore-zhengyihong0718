@@ -1,10 +1,12 @@
 //! Process management syscalls
 //!
 use alloc::sync::Arc;
+use alloc::vec::Vec;
+use alloc::string::String;
 
 use crate::{
     fs::{open_file, OpenFlags},
-    mm::{translated_refmut, translated_str},
+    mm::{translated_refmut, translated_str, PageTable},
     task::{
         add_task, current_task, current_user_token, exit_current_and_run_next,
         suspend_current_and_run_next,
@@ -105,30 +107,53 @@ pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32) -> isize {
 /// YOUR JOB: get time with second and microsecond
 /// HINT: You might reimplement it with virtual memory management.
 /// HINT: What if [`TimeVal`] is splitted by two pages ?
-pub fn sys_get_time(_ts: *mut TimeVal, _tz: usize) -> isize {
-    trace!(
-        "kernel:pid[{}] sys_get_time NOT IMPLEMENTED",
-        current_task().unwrap().pid.0
-    );
-    -1
+pub fn sys_get_time(ts: *mut TimeVal, _tz: usize) -> isize {
+    trace!("kernel: sys_get_time");
+    // AI assistance: Codex. Validate every destination before writing any byte.
+    // Each byte is translated independently, so TimeVal may straddle two pages.
+    let table = PageTable::from_token(current_user_token());
+    let mut destinations = Vec::new();
+    for offset in 0..core::mem::size_of::<TimeVal>() {
+        let addr = match (ts as usize).checked_add(offset) {
+            Some(addr) => addr,
+            None => return -1,
+        };
+        match table.translate_user_va(addr, true) {
+            Some(pa) => destinations.push(pa.0 as *mut u8),
+            None => return -1,
+        }
+    }
+    let us = crate::timer::get_time_us();
+    let time = TimeVal {
+        sec: us / 1_000_000,
+        usec: us % 1_000_000,
+    };
+    let bytes = unsafe {
+        core::slice::from_raw_parts(
+            &time as *const TimeVal as *const u8,
+            core::mem::size_of::<TimeVal>(),
+        )
+    };
+    for (ptr, &byte) in destinations.into_iter().zip(bytes) {
+        unsafe {
+            ptr.write_volatile(byte);
+        }
+    }
+    0
 }
 
 /// YOUR JOB: Implement mmap.
-pub fn sys_mmap(_start: usize, _len: usize, _port: usize) -> isize {
-    trace!(
-        "kernel:pid[{}] sys_mmap NOT IMPLEMENTED",
-        current_task().unwrap().pid.0
-    );
-    -1
+pub fn sys_mmap(start: usize, len: usize, prot: usize) -> isize {
+    let task = current_task().unwrap();
+    let result = task.inner_exclusive_access().memory_set.map_user_range(start, len, prot);
+    result
 }
 
 /// YOUR JOB: Implement munmap.
-pub fn sys_munmap(_start: usize, _len: usize) -> isize {
-    trace!(
-        "kernel:pid[{}] sys_munmap NOT IMPLEMENTED",
-        current_task().unwrap().pid.0
-    );
-    -1
+pub fn sys_munmap(start: usize, len: usize) -> isize {
+    let task = current_task().unwrap();
+    let result = task.inner_exclusive_access().memory_set.unmap_user_range(start, len);
+    result
 }
 
 /// change data segment size
@@ -143,19 +168,54 @@ pub fn sys_sbrk(size: i32) -> isize {
 
 /// YOUR JOB: Implement spawn.
 /// HINT: fork + exec =/= spawn
-pub fn sys_spawn(_path: *const u8) -> isize {
-    trace!(
-        "kernel:pid[{}] sys_spawn NOT IMPLEMENTED",
-        current_task().unwrap().pid.0
-    );
-    -1
+pub fn sys_spawn(path: *const u8) -> isize {
+    // AI assistance: Codex; create the target ELF directly, without fork's copy.
+    let table = PageTable::from_token(current_user_token());
+    let mut bytes = Vec::new();
+    let mut name = None;
+    for offset in 0..4096 {
+        let addr = match (path as usize).checked_add(offset) {
+            Some(addr) => addr,
+            None => return -1,
+        };
+        let pa = match table.translate_user_va(addr, false) {
+            Some(pa) => pa,
+            None => return -1,
+        };
+        let byte = unsafe { (pa.0 as *const u8).read_volatile() };
+        if byte == 0 {
+            name = String::from_utf8(bytes).ok();
+            break;
+        }
+        bytes.push(byte);
+    }
+    let name = match name {
+        Some(name) => name,
+        None => return -1,
+    };
+    let inode = match open_file(name.as_str(), OpenFlags::RDONLY) {
+        Some(inode) => inode, None => return -1,
+    };
+    let data = inode.read_all();
+    let parent = current_task().unwrap();
+    let child = Arc::new(crate::task::TaskControlBlock::new(data.as_slice()));
+    let pid = child.getpid();
+    {
+        let files = parent.inner_exclusive_access().fd_table.clone();
+        let mut inner = child.inner_exclusive_access();
+        inner.parent = Some(Arc::downgrade(&parent));
+        inner.fd_table = files;
+    }
+    parent.inner_exclusive_access().children.push(child.clone());
+    add_task(child);
+    pid as isize
 }
 
 // YOUR JOB: Set task priority.
-pub fn sys_set_priority(_prio: isize) -> isize {
-    trace!(
-        "kernel:pid[{}] sys_set_priority NOT IMPLEMENTED",
-        current_task().unwrap().pid.0
-    );
-    -1
+pub fn sys_set_priority(prio: isize) -> isize {
+    if prio < 2 {
+        return -1;
+    }
+    current_task().unwrap().inner_exclusive_access().priority = prio as usize;
+    prio
 }
