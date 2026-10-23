@@ -103,11 +103,13 @@ mod fs;
 mod process;
 mod sync;
 mod thread;
+mod time;
 
 use fs::*;
 use process::*;
 use sync::*;
 use thread::*;
+use time::*;
 
 use crate::fs::Stat;
 

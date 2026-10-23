@@ -150,6 +150,27 @@ impl PageTable {
             (aligned_pa_usize + offset).into()
         })
     }
+    /// Translate a valid lower-half user address with required access permission.
+    pub fn translate_user_va(&self, addr: usize, write: bool) -> Option<super::PhysAddr> {
+        // Reject noncanonical aliases before VirtAddr::from masks high bits.
+        if addr >= (1usize << 38) {
+            return None;
+        }
+        let va = VirtAddr::from(addr);
+        let pte = self.translate(va.floor())?;
+        if !pte.is_valid()
+            || !pte.flags().contains(PTEFlags::U)
+            || (pte.writable() && !pte.readable())
+            || if write {
+                !pte.writable()
+            } else {
+                !pte.readable()
+            }
+        {
+            return None;
+        }
+        Some(super::PhysAddr((pte.ppn().0 << 12) + va.page_offset()))
+    }
     /// get the token from the page table
     pub fn token(&self) -> usize {
         8usize << 60 | self.root_ppn.0

@@ -89,6 +89,17 @@ pub fn exit_current_and_run_next(exit_code: i32) {
     drop(task_inner);
 
     // Move the task to stop-wait status, to avoid kernel stack from being freed
+    {
+        // Do not simulate an exited owner as able to release resources later.
+        // Availability remains unchanged, including for an abandoned mutex.
+        let inner = process.inner_exclusive_access();
+        for mutex in inner.mutex_list.iter().flatten() {
+            mutex.retire(tid);
+        }
+        for semaphore in inner.semaphore_list.iter().flatten() {
+            semaphore.retire(tid);
+        }
+    }
     if tid == 0 {
         add_stopping_task(task);
     } else {
