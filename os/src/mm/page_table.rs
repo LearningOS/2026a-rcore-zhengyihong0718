@@ -99,7 +99,7 @@ impl PageTable {
                 break;
             }
             if !pte.is_valid() {
-                let frame = frame_alloc().unwrap();
+                let frame = frame_alloc()?;
                 *pte = PageTableEntry::new(frame.ppn, PTEFlags::V);
                 self.frames.push(frame);
             }
@@ -131,6 +131,37 @@ impl PageTable {
         let pte = self.find_pte_create(vpn).unwrap();
         assert!(!pte.is_valid(), "vpn {:?} is mapped before mapping", vpn);
         *pte = PageTableEntry::new(ppn, flags | PTEFlags::V);
+    }
+    /// Map or translate a checked user page.
+    pub fn try_map(&mut self, vpn: VirtPageNum, ppn: PhysPageNum, flags: PTEFlags) -> bool {
+        if let Some(pte) = self.find_pte_create(vpn) {
+            if !pte.is_valid() {
+                *pte = PageTableEntry::new(ppn, flags | PTEFlags::V);
+                return true;
+            }
+        }
+        false
+    }
+    /// Map or translate a checked user page.
+    pub fn translate_user_va(&self, addr: usize, write: bool) -> Option<super::PhysAddr> {
+        // Reject noncanonical aliases before VirtAddr::from masks high bits.
+        if addr >= (1usize << 38) {
+            return None;
+        }
+        let va = VirtAddr::from(addr);
+        let pte = self.translate(va.floor())?;
+        if !pte.is_valid()
+            || !pte.flags().contains(PTEFlags::U)
+            || (pte.writable() && !pte.readable())
+            || if write {
+                !pte.writable()
+            } else {
+                !pte.readable()
+            }
+        {
+            return None;
+        }
+        Some(super::PhysAddr((pte.ppn().0 << 12) + va.page_offset()))
     }
     /// remove the map between virtual page number and physical page number
     #[allow(unused)]

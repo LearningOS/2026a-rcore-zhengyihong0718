@@ -240,16 +240,17 @@ impl MemorySet {
         memory_set.map_trampoline();
         // copy data sections/trap_context/user_stack
         for area in user_space.areas.iter() {
-            let new_area = MapArea::from_another(area);
-            memory_set.push(new_area, None);
+            let mut new_area = MapArea::from_another(area);
             // copy data from another space
-            for vpn in area.vpn_range {
+            for &vpn in area.data_frames.keys() {
+                new_area.map_one(&mut memory_set.page_table, vpn);
                 let src_ppn = user_space.translate(vpn).unwrap().ppn();
                 let dst_ppn = memory_set.translate(vpn).unwrap().ppn();
                 dst_ppn
                     .get_bytes_array()
                     .copy_from_slice(src_ppn.get_bytes_array());
             }
+            memory_set.areas.push(new_area);
         }
         memory_set
     }
@@ -264,6 +265,113 @@ impl MemorySet {
     /// Translate a virtual page number to a page table entry
     pub fn translate(&self, vpn: VirtPageNum) -> Option<PageTableEntry> {
         self.page_table.translate(vpn)
+    }
+
+    // AI assistance: Codex; migrated from this student repo ch4, official Guide chapter4/7exercise.
+    /// Validate or manage a user mapping range.
+    fn user_range(start: usize, len: usize) -> Option<VPNRange> {
+        if start % PAGE_SIZE != 0 || start >= (1usize << 38) {
+            return None;
+        }
+        let end = start.checked_add(len)?.checked_add(PAGE_SIZE - 1)? & !(PAGE_SIZE - 1);
+        if end > (1usize << 38) {
+            return None;
+        }
+        Some(VPNRange::new(
+            VirtPageNum(start / PAGE_SIZE),
+            VirtPageNum(end / PAGE_SIZE),
+        ))
+    }
+    /// Validate or manage a user mapping range.
+    pub fn map_user_range(&mut self, start: usize, len: usize, prot: usize) -> isize {
+        if prot == 0 || prot & !7 != 0 {
+            return -1;
+        }
+        let range = match Self::user_range(start, len) {
+            Some(range) => range,
+            None => return -1,
+        };
+        for vpn in range {
+            if self
+                .page_table
+                .translate(vpn)
+                .map_or(false, |pte| pte.is_valid())
+            {
+                return -1;
+            }
+        }
+        if len == 0 {
+            return 0;
+        }
+        let permission =
+            MapPermission::from_bits(((prot as u8) << 1) | MapPermission::U.bits()).unwrap();
+        let mut area = MapArea::new(
+            start.into(),
+            (start + len).into(),
+            MapType::Framed,
+            permission,
+        );
+        area.is_mmap = true;
+        for vpn in range {
+            let mapped = if let Some(frame) = frame_alloc() {
+                if self.page_table.try_map(
+                    vpn,
+                    frame.ppn,
+                    PTEFlags::from_bits(permission.bits()).unwrap(),
+                ) {
+                    area.data_frames.insert(vpn, frame);
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+            if !mapped {
+                // Keep ownership and PTEs consistent even on a partial allocation.
+                for &mapped_vpn in area.data_frames.keys() {
+                    self.page_table.unmap(mapped_vpn);
+                }
+                return -1;
+            }
+        }
+        self.areas.push(area);
+        0
+    }
+    /// Validate or manage a user mapping range.
+    pub fn unmap_user_range(&mut self, start: usize, len: usize) -> isize {
+        let range = match Self::user_range(start, len) {
+            Some(range) => range,
+            None => return -1,
+        };
+        // Validate all pages before changing any mappings.
+        for vpn in range {
+            let valid = self.page_table.translate(vpn).map_or(false, |pte| {
+                pte.is_valid() && pte.flags().contains(PTEFlags::U)
+            });
+            if !valid
+                || !self
+                    .areas
+                    .iter()
+                    .any(|area| area.data_frames.contains_key(&vpn))
+            {
+                return -1;
+            }
+        }
+        for vpn in range {
+            self.page_table.unmap(vpn);
+            if let Some(area) = self
+                .areas
+                .iter_mut()
+                .find(|area| area.data_frames.contains_key(&vpn))
+            {
+                area.data_frames.remove(&vpn);
+            }
+        }
+        // Keep the heap's identity even when munmap removes all of its pages.
+        self.areas
+            .retain(|area| !area.is_mmap || !area.data_frames.is_empty());
+        0
     }
 
     ///Remove all `MapArea`
@@ -294,6 +402,17 @@ impl MemorySet {
             .iter_mut()
             .find(|area| area.vpn_range.get_start() == start.floor())
         {
+            // mmap may occupy a hole at or beyond the current heap break.
+            // Report an allocation conflict instead of panicking in map_one.
+            for vpn in VPNRange::new(area.vpn_range.get_end(), new_end.ceil()) {
+                if self
+                    .page_table
+                    .translate(vpn)
+                    .map_or(false, |pte| pte.is_valid())
+                {
+                    return false;
+                }
+            }
             area.append_to(&mut self.page_table, new_end.ceil());
             true
         } else {
@@ -307,6 +426,7 @@ pub struct MapArea {
     data_frames: BTreeMap<VirtPageNum, FrameTracker>,
     map_type: MapType,
     map_perm: MapPermission,
+    is_mmap: bool,
 }
 
 impl MapArea {
@@ -323,6 +443,7 @@ impl MapArea {
             data_frames: BTreeMap::new(),
             map_type,
             map_perm,
+            is_mmap: false,
         }
     }
     pub fn from_another(another: &Self) -> Self {
@@ -331,6 +452,7 @@ impl MapArea {
             data_frames: BTreeMap::new(),
             map_type: another.map_type,
             map_perm: another.map_perm,
+            is_mmap: another.is_mmap,
         }
     }
     pub fn map_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) {
@@ -350,7 +472,11 @@ impl MapArea {
     }
     pub fn unmap_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) {
         if self.map_type == MapType::Framed {
-            self.data_frames.remove(&vpn);
+            // A prior munmap may have removed this page, or mmap may now own
+            // the hole. Only remove mappings whose frames this area owns.
+            if self.data_frames.remove(&vpn).is_none() {
+                return;
+            }
         }
         page_table.unmap(vpn);
     }
