@@ -285,7 +285,6 @@ impl MemorySet {
         self.page_table.translate(vpn)
     }
 
-
     // AI assistance: Codex; migrated from this student repo ch4, official Guide chapter4/7exercise.
     /// Validate or manage a user mapping range.
     fn user_range(start: usize, len: usize) -> Option<VPNRange> {
@@ -454,7 +453,6 @@ impl MapArea {
         end_va: VirtAddr,
         map_type: MapType,
         map_perm: MapPermission,
-    is_mmap: bool,
     ) -> Self {
         let start_vpn: VirtPageNum = start_va.floor();
         let end_vpn: VirtPageNum = end_va.ceil();

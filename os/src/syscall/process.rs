@@ -1,8 +1,8 @@
 //! Process management syscalls
 //!
+use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use alloc::string::String;
 
 use crate::{
     fs::{open_file, OpenFlags},
@@ -145,14 +145,20 @@ pub fn sys_get_time(ts: *mut TimeVal, _tz: usize) -> isize {
 /// YOUR JOB: Implement mmap.
 pub fn sys_mmap(start: usize, len: usize, prot: usize) -> isize {
     let task = current_task().unwrap();
-    let result = task.inner_exclusive_access().memory_set.map_user_range(start, len, prot);
+    let result = task
+        .inner_exclusive_access()
+        .memory_set
+        .map_user_range(start, len, prot);
     result
 }
 
 /// YOUR JOB: Implement munmap.
 pub fn sys_munmap(start: usize, len: usize) -> isize {
     let task = current_task().unwrap();
-    let result = task.inner_exclusive_access().memory_set.unmap_user_range(start, len);
+    let result = task
+        .inner_exclusive_access()
+        .memory_set
+        .unmap_user_range(start, len);
     result
 }
 
@@ -194,7 +200,8 @@ pub fn sys_spawn(path: *const u8) -> isize {
         None => return -1,
     };
     let inode = match open_file(name.as_str(), OpenFlags::RDONLY) {
-        Some(inode) => inode, None => return -1,
+        Some(inode) => inode,
+        None => return -1,
     };
     let data = inode.read_all();
     let parent = current_task().unwrap();

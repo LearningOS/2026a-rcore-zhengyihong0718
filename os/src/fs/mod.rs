@@ -7,6 +7,10 @@ use crate::mm::UserBuffer;
 
 /// trait File for all file types
 pub trait File: Send + Sync {
+    /// Metadata is available only for files backed by a filesystem inode.
+    fn stat(&self) -> Option<Stat> {
+        None
+    }
     /// the file readable?
     fn readable(&self) -> bool;
     /// the file writable?
@@ -33,6 +37,19 @@ pub struct Stat {
     pad: [u64; 7],
 }
 
+impl Stat {
+    /// Construct fully initialized metadata, including ABI compatibility fields.
+    pub fn new(ino: u64, mode: StatMode, nlink: u32) -> Self {
+        Self {
+            dev: 0,
+            ino,
+            mode,
+            nlink,
+            pad: [0; 7],
+        }
+    }
+}
+
 bitflags! {
     /// The mode of a inode
     /// whether a directory or a file
@@ -46,5 +63,5 @@ bitflags! {
     }
 }
 
-pub use inode::{list_apps, open_file, OSInode, OpenFlags};
+pub use inode::{list_apps, open_file, OSInode, OpenFlags, ROOT_INODE};
 pub use stdio::{Stdin, Stdout};

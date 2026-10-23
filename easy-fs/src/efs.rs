@@ -1,8 +1,11 @@
+// Codex assisted the handle-lifetime and reclamation implementation.
+// Specification: LearningOS/rCore-Tutorial-Guide, source/chapter6/4exercise.rst.
 use super::{
     block_cache_sync_all, get_block_cache, Bitmap, BlockDevice, DiskInode, DiskInodeType, Inode,
     SuperBlock,
 };
 use crate::BLOCK_SZ;
+use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use spin::Mutex;
 ///An easy file system on block
@@ -15,6 +18,8 @@ pub struct EasyFileSystem {
     pub data_bitmap: Bitmap,
     inode_area_start_block: u32,
     data_area_start_block: u32,
+    // Counts distinct VFS handles, including independently opened descriptors.
+    pub(crate) handles: BTreeMap<u32, usize>,
 }
 
 type DataBlock = [u8; BLOCK_SZ];
@@ -45,6 +50,7 @@ impl EasyFileSystem {
             data_bitmap,
             inode_area_start_block: 1 + inode_bitmap_blocks,
             data_area_start_block: 1 + inode_total_blocks + data_bitmap_blocks,
+            handles: BTreeMap::new(),
         };
         // clear all blocks
         for i in 0..total_blocks {
@@ -99,6 +105,7 @@ impl EasyFileSystem {
                     ),
                     inode_area_start_block: 1 + super_block.inode_bitmap_blocks,
                     data_area_start_block: 1 + inode_total_blocks + super_block.data_bitmap_blocks,
+                    handles: BTreeMap::new(),
                 };
                 Arc::new(Mutex::new(efs))
             })
@@ -128,6 +135,54 @@ impl EasyFileSystem {
     /// Allocate a new inode
     pub fn alloc_inode(&mut self) -> u32 {
         self.inode_bitmap.alloc(&self.block_device).unwrap() as u32
+    }
+
+    pub(crate) fn inode_id(&self, block: usize, offset: usize) -> u32 {
+        let size = core::mem::size_of::<DiskInode>();
+        (block as u32 - self.inode_area_start_block) * (BLOCK_SZ / size) as u32
+            + (offset / size) as u32
+    }
+
+    // The flat root directory is the authoritative, persistent link table.
+    // This preserves the existing disk layout and packed application images.
+    pub(crate) fn link_count(&self, id: u32) -> u32 {
+        if id == 0 {
+            return 1;
+        }
+        let (block, offset) = self.get_disk_inode_pos(0);
+        get_block_cache(block as usize, self.block_device.clone())
+            .lock()
+            .read(offset, |root: &DiskInode| {
+                let mut count = 0;
+                let mut entry = super::DirEntry::empty();
+                for i in 0..root.size as usize / super::DIRENT_SZ {
+                    root.read_at(
+                        i * super::DIRENT_SZ,
+                        entry.as_bytes_mut(),
+                        &self.block_device,
+                    );
+                    if !entry.name().is_empty() && entry.inode_id() == id {
+                        count += 1;
+                    }
+                }
+                count
+            })
+    }
+
+    pub(crate) fn reclaim_if_unused(&mut self, id: u32) {
+        if id == 0 || self.handles.contains_key(&id) || self.link_count(id) != 0 {
+            return;
+        }
+        let (block, offset) = self.get_disk_inode_pos(id);
+        let blocks = get_block_cache(block as usize, self.block_device.clone())
+            .lock()
+            .modify(offset, |inode: &mut DiskInode| {
+                inode.clear_size(&self.block_device)
+            });
+        for block in blocks {
+            self.dealloc_data(block);
+        }
+        self.inode_bitmap.dealloc(&self.block_device, id as usize);
     }
 
     /// Allocate a data block
